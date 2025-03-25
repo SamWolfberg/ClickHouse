@@ -557,8 +557,6 @@ void QueryStatus::removePipelineExecutor(PipelineExecutor * e)
 
 bool QueryStatus::checkTimeLimit()
 {
-    LOG_DEBUG(getLogger("QueryStatus"), "checkTimeLimit at continuing {}", overflow_mode);
-
     auto elapsed_ns = watch.elapsed();
     throwProperExceptionIfNeeded(limits.max_execution_time.totalMilliseconds(), elapsed_ns);
 
