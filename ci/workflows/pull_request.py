@@ -54,6 +54,10 @@ workflow = Workflow.Config(
         *JobConfigs.ast_fuzzer_jobs,
         *JobConfigs.buzz_fuzzer_jobs,
         *JobConfigs.performance_comparison_with_master_head_jobs,
+        #TODO: test
+        *JobConfigs.clickbench_master_jobs,
+        *JobConfigs.sqlancer_master_jobs,
+        JobConfigs.sqltest_master_job,
     ],
     artifacts=[
         *ArtifactConfigs.unittests_binaries,

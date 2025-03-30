@@ -84,3 +84,5 @@ ENV EXPORT_S3_STORAGE_POLICIES=1
 
 RUN npm install -g azurite@3.33.0 \
     && npm install -g tslib && npm install -g node
+
+RUN mkdir /dev/shm/clickhouse && chmod 777 /dev/shm/clickhouse
