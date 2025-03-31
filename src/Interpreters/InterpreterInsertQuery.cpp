@@ -20,7 +20,7 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/createSubcolumnsExtractionActions.h>
-#include <Interpreters/InsertToViews.h>
+#include <Interpreters/InsertDependenciesBuilder.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTLiteral.h>
@@ -45,13 +45,10 @@
 #include <Storages/StorageMaterializedView.h>
 #include <Storages/WindowView/StorageWindowView.h>
 #include <TableFunctions/TableFunctionFactory.h>
-#include "Common/Logger.h"
 #include <Common/logger_useful.h>
 #include <Common/ThreadStatus.h>
 #include <Common/checkStackSize.h>
 #include <Common/ProfileEvents.h>
-#include "Core/Names.h"
-#include <Processors/Sinks/SinkToStorage.h>
 
 #include <memory>
 
@@ -203,6 +200,25 @@ Block InterpreterInsertQuery::getSampleBlock(
     return getSampleBlock(names, table, metadata_snapshot, no_destination, allow_materialized);
 }
 
+std::optional<Names> InterpreterInsertQuery::getInsertColumnNames() const
+{
+    auto const * insert_query = query_ptr->as<ASTInsertQuery>();
+    if (!insert_query || !insert_query->columns)
+        return std::nullopt;
+
+    auto table = DatabaseCatalog::instance().getTable(getDatabaseTable(), getContext());
+    const auto columns_ast = processColumnTransformers(getContext()->getCurrentDatabase(), table, table->getInMemoryMetadataPtr(), insert_query->columns);
+    Names names;
+    names.reserve(columns_ast->children.size());
+    for (const auto & identifier : columns_ast->children)
+    {
+        std::string current_name = identifier->getColumnName();
+        names.emplace_back(std::move(current_name));
+    }
+
+    return names;
+}
+
 Block InterpreterInsertQuery::getSampleBlock(
     const Names & names,
     const StoragePtr & table,
@@ -247,43 +263,6 @@ Block InterpreterInsertQuery::getSampleBlock(
             res.insert(ColumnWithTypeAndName(table_sample_insertable.getByName(current_name).type, current_name));
     }
     return res;
-}
-
-// Block InterpreterInsertQuery::getSampleBlockForInsertion(
-//     const Names & requested,
-//     const StoragePtr & table,
-//     const StorageMetadataPtr & metadata_snapshot,
-//     bool allow_virtuals,
-//     bool allow_materialized)
-// {
-//     auto required_names = allow_materialized ? metadata_snapshot->getSampleBlock().getNames() : metadata_snapshot->getSampleBlockNonMaterialized().getNames();
-//     auto uniq = NameSet(required_names.begin(), required_names.end());
-
-//     for (const auto & req : requested)
-//     {
-//         if (uniq.insert(req).second)
-//             required_names.push_back(req);
-//     }
-//     return getSampleBlock(required_names, table, metadata_snapshot, allow_virtuals, allow_materialized);
-// }
-
-std::optional<Names> InterpreterInsertQuery::getInsertColumnNames() const
-{
-    auto const * insert_query = query_ptr->as<ASTInsertQuery>();
-    if (!insert_query || !insert_query->columns)
-        return std::nullopt;
-
-    auto table = DatabaseCatalog::instance().getTable(getDatabaseTable(), getContext());
-    const auto columns_ast = processColumnTransformers(getContext()->getCurrentDatabase(), table, table->getInMemoryMetadataPtr(), insert_query->columns);
-    Names names;
-    names.reserve(columns_ast->children.size());
-    for (const auto & identifier : columns_ast->children)
-    {
-        std::string current_name = identifier->getColumnName();
-        names.emplace_back(std::move(current_name));
-    }
-
-    return names;
 }
 
 static bool hasAggregateFunctions(const IAST * ast)
@@ -531,7 +510,7 @@ QueryPipeline InterpreterInsertQuery::buildInsertSelectPipeline(ASTInsertQuery &
     }
 
     bool skip_destination_table = no_destination;
-    auto views_manager = ViewsManager::create(table, query_ptr, query_sample_block,
+    auto insert_dependencies = InsertDependenciesBuilder::create(table, query_ptr, query_sample_block,
         async_insert, skip_destination_table, allow_materialized,
         getContext());
 
@@ -551,42 +530,31 @@ QueryPipeline InterpreterInsertQuery::buildInsertSelectPipeline(ASTInsertQuery &
     for (size_t i = 0; i < sink_streams_size; ++i)
     {
         Chain out;
-        out.addViewsManager(views_manager);
+        out.addInsertDependenciesBuilder(insert_dependencies);
 
         if (!no_destination)
         {
-            out.appendChainNotStrict(views_manager->createPreSink());
-            out.appendChainNotStrict(views_manager->createSink());
+            out.appendChainNotStrict(insert_dependencies->createPreSink());
+            out.appendChainNotStrict(insert_dependencies->createSink());
         }
 
         if (!table->noPushingToViews())
-            out.appendChainNotStrict(views_manager->createPostSink());
+            out.appendChainNotStrict(insert_dependencies->createPostSink());
 
         sink_chains.push_back(std::move(out));
     }
 
-    LOG_DEBUG(getLogger("InterpreterInsertQuery"), "resize");
     pipeline.resize(sink_streams_size);
 
-    LOG_DEBUG(getLogger("InterpreterInsertQuery"), "sink_chains");
     for (auto & chain : sink_chains)
     {
         pipeline.addResources(chain.detachResources());
     }
     pipeline.addChains(std::move(sink_chains));
 
-    if (is_trivial_insert_select)
-    {
-        LOG_DEBUG(getLogger("InterpreterInsertQuery"), "set num thread at {}", max_insert_threads);
-        pipeline.setMaxThreads(max_insert_threads);
-    }
-    else
-    {
-        LOG_DEBUG(getLogger("InterpreterInsertQuery"), "set num thread at {}", std::max(num_select_threads, max_insert_threads));
-        pipeline.setMaxThreads(std::max(num_select_threads, max_insert_threads));
-    }
 
-    LOG_DEBUG(getLogger("InterpreterInsertQuery"), "EmptySink");
+    pipeline.setMaxThreads(is_trivial_insert_select ? max_insert_threads : std::max(num_select_threads, max_insert_threads));
+
     pipeline.setSinks([&](const Block & cur_header, QueryPipelineBuilder::StreamType) -> ProcessorPtr
     {
         return std::make_shared<EmptySink>(cur_header);
@@ -606,18 +574,18 @@ QueryPipeline InterpreterInsertQuery::buildInsertPipeline(ASTInsertQuery & query
     // when insert is initiated from FileLog or similar storages
     // they are allowed to expose its virtuals columns to the dependent views
     bool skip_destination_table = no_destination;
-    auto views_manager = ViewsManager::create(table, query_ptr, query_sample_block,
+    auto insert_dependencies = InsertDependenciesBuilder::create(table, query_ptr, query_sample_block,
         async_insert, skip_destination_table, allow_materialized,
         getContext());
 
     Chain chain;
     if (!no_destination)
     {
-        chain.appendChainNotStrict(views_manager->createPreSink());
-        chain.appendChainNotStrict(views_manager->createSink());
+        chain.appendChainNotStrict(insert_dependencies->createPreSink());
+        chain.appendChainNotStrict(insert_dependencies->createSink());
     }
-    chain.appendChainNotStrict(views_manager->createPostSink());
-    chain.addViewsManager(views_manager);
+    chain.appendChainNotStrict(insert_dependencies->createPostSink());
+    chain.addInsertDependenciesBuilder(insert_dependencies);
 
     if (!settings[Setting::insert_deduplication_token].value.empty())
     {
@@ -656,7 +624,6 @@ QueryPipeline InterpreterInsertQuery::buildInsertPipeline(ASTInsertQuery & query
 
     QueryPipeline pipeline = QueryPipeline(std::move(chain));
 
-    LOG_DEBUG(getLogger("InterpreterInsertQuery"), "set num thread at {}", max_insert_threads);
     pipeline.setNumThreads(max_insert_threads);
     pipeline.setConcurrencyControl(settings[Setting::use_concurrency_control]);
 
@@ -746,8 +713,6 @@ BlockIO InterpreterInsertQuery::execute()
 
     if (const auto * mv = dynamic_cast<const StorageMaterializedView *>(table.get()))
         res.pipeline.addStorageHolder(mv->getTargetTable());
-
-    LOG_DEBUG(getLogger("InterpreterInsertQuery"), "Pipeline could use up to {} thread", res.pipeline.getNumThreads());
 
     return res;
 }

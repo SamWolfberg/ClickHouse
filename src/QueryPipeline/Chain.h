@@ -8,8 +8,8 @@
 namespace DB
 {
 
-class ViewsManager;
-using ViewsManagerConstPtr = std::shared_ptr<const ViewsManager>;
+class InsertDependenciesBuilder;
+using InsertDependenciesBuilderConstPtr = std::shared_ptr<const InsertDependenciesBuilder>;
 
 /// Has one unconnected input port and one unconnected output port.
 /// There may be other ports on the processors, but they must all be connected.
@@ -57,7 +57,7 @@ public:
     void addTableLock(TableLockHolder lock) { holder.table_locks.emplace_back(std::move(lock)); }
     void addStorageHolder(StoragePtr storage) { holder.storage_holders.emplace_back(std::move(storage)); }
     void addInterpreterContext(ContextPtr context) { holder.interpreter_context.emplace_back(std::move(context)); }
-    void addViewsManager(ViewsManagerConstPtr view_manager) { holder.views_holder.emplace_back(std::move(view_manager)); }
+    void addInsertDependenciesBuilder(InsertDependenciesBuilderConstPtr insert_dependencies) { holder.insert_dependencies_holder.emplace_back(std::move(insert_dependencies)); }
 
 
     void attachResources(QueryPlanResourceHolder holder_)

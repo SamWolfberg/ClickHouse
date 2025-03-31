@@ -24,13 +24,13 @@ using StoragePtr = std::shared_ptr<IStorage>;
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
 
-class ViewsManager : public std::enable_shared_from_this<ViewsManager>
+class InsertDependenciesBuilder : public std::enable_shared_from_this<InsertDependenciesBuilder>
 {
 private:
-    // This class just releases some restriction from StorageID
-    // StorageIDPrivate has default c-tor implemented as StorageID::createEmpty()
     struct StorageIDPrivate : public StorageID
     {
+        // This class just releases some restriction from StorageID
+        // StorageIDPrivate has default c-tor implemented as StorageID::createEmpty()
         using StorageID::StorageID;
 
         StorageIDPrivate();
@@ -40,13 +40,7 @@ private:
         bool operator==(const StorageIDPrivate & other) const;
     };
 
-    struct BundleID
-    {
-        StorageIDPrivate view_id;
-        StorageIDPrivate inner_id;
-    };
-
-    class VisitedPath
+    class DependencyPath
     {
     private:
         std::vector<StorageIDPrivate> path;
@@ -80,14 +74,14 @@ private:
     using MapIdViewType = std::map<StorageIDPrivate, QueryViewsLogElement::ViewType>;
 
 public:
-    using ConstPtr = std::shared_ptr<const ViewsManager>;
+    using ConstPtr = std::shared_ptr<const InsertDependenciesBuilder>;
 
     template <class... Args>
     static ConstPtr create(Args &&... args)
     {
-        struct MakeSharedEnabler : public ViewsManager
+        struct MakeSharedEnabler : public InsertDependenciesBuilder
         {
-            explicit MakeSharedEnabler(Args &&... args) : ViewsManager(std::forward<Args>(args)...) {}
+            explicit MakeSharedEnabler(Args &&... args) : InsertDependenciesBuilder(std::forward<Args>(args)...) {}
         };
         return std::make_shared<const MakeSharedEnabler>(std::forward<Args>(args)...);
     }
@@ -95,16 +89,16 @@ public:
     Chain createPreSink() const;
     Chain createSink() const;
     Chain createPostSink() const;
-    Chain createRetry(VisitedPath path);
 
     void logQueryView(StorageID view_id, std::exception_ptr exception, bool before_start = false) const;
 
 protected:
-    ViewsManager(StoragePtr table, ASTPtr query, Block insert_header, bool async_insert_, bool skip_destination_table_, bool allow_materialized_, ContextPtr context);
+    InsertDependenciesBuilder(StoragePtr table, ASTPtr query, Block insert_header, bool async_insert_, bool skip_destination_table_, bool allow_materialized_, ContextPtr context);
 
 private:
-    bool registerPath(VisitedPath path);
-    void buildRelaitions();
+    std::pair<ContextPtr, ContextPtr> createSelectInsertContext(const DependencyPath & path);
+    bool collectPath(const DependencyPath & path);
+    void collectAllDependencies();
 
     Chain createPreSink(StorageIDPrivate view_id) const;
     Chain createSelect(StorageIDPrivate view_id) const;
@@ -118,8 +112,9 @@ private:
     ASTPtr init_query;
     Block init_header;
     ContextPtr init_context;
-    bool async_insert;
-    bool skip_destination_table;
+
+    bool async_insert = false;
+    bool skip_destination_table = false;
     bool allow_materialized = false;
 
     StorageIDPrivate root_view;
@@ -137,9 +132,11 @@ private:
     MapIdBlock input_headers;
     MapIdBlock output_headers;
     MapIdThreadGroup thread_groups;
+
     LoggerPtr logger;
 
 public:
+    // expose settings value into public
     bool deduplicate_blocks_in_dependent_materialized_views = false;
     bool insert_null_as_default = false;
     bool materialized_views_ignore_errors = false;

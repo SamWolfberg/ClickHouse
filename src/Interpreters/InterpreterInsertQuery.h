@@ -60,13 +60,6 @@ public:
       bool allow_virtuals,
       bool allow_materialized);
 
-    // static Block getSampleBlockForInsertion(
-    //   const Names & requested,
-    //   const StoragePtr & table,
-    //   const StorageMetadataPtr & metadata_snapshot,
-    //   bool no_destination,
-    //   bool allow_materialized);
-
     bool supportsTransactions() const override { return true; }
 
     void addBuffer(std::unique_ptr<ReadBuffer> buffer);
