@@ -103,7 +103,7 @@ def main():
     if not info.is_local_run:
         os.environ["SCCACHE_BUCKET"] = Settings.S3_ARTIFACT_PATH
         os.environ["SCCACHE_S3_KEY_PREFIX"] = "ccache/sccache"
-        os.environ["CTCACHE_DIR"] = "ccache/clang-tidy-cache"
+        os.environ["CTCACHE_DIR"] = "/ccache/clang-tidy-cache"
         os.environ["CTCACHE_S3_BUCKET"] = Settings.S3_ARTIFACT_PATH
         os.environ["CTCACHE_S3_FOLDER"] = "clang-tidy-cache"
         os.environ["CTCACHE_S3_NO_CREDENTIALS"] = "true"
@@ -154,6 +154,7 @@ def main():
 
     if res and JobStages.BUILD in stages:
         Shell.check("sccache --show-stats")
+        Shell.check("find /ccache/clang-tidy-cache -type f")
         if build_type in BUILD_TYPE_TO_DEB_PACKAGE_TYPE:
             targets = "clickhouse-bundle"
         elif build_type == BuildTypes.FUZZERS:
@@ -171,6 +172,7 @@ def main():
             )
         )
         Shell.check("sccache --show-stats", verbose=True)
+        Shell.check("find /ccache/clang-tidy-cache -type f")
         Shell.check(f"ls -l {build_dir}/programs/", verbose=True)
         Shell.check(f"pwd")
         res = results[-1].is_ok()
