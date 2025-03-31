@@ -617,12 +617,14 @@ ViewsManager::ViewsManager(StoragePtr table, ASTPtr query, Block insert_header,
     , allow_materialized(allow_materialized_)
     , logger(getLogger("ViewsManager"))
 {
-    deduplicate_blocks_in_dependent_materialized_views = init_context->getSettingsRef()[Setting::deduplicate_blocks_in_dependent_materialized_views];
+    auto & settings = init_context->getSettingsRef();
 
     const ASTInsertQuery * as_insert_query = init_query->as<ASTInsertQuery>();
-    insert_null_as_default = as_insert_query && as_insert_query->select && init_context->getSettingsRef()[Setting::insert_null_as_default];
+    insert_null_as_default = as_insert_query && as_insert_query->select && settings[Setting::insert_null_as_default];
 
-    materialized_views_ignore_errors = init_context->getSettingsRef()[Setting::materialized_views_ignore_errors];
+    deduplicate_blocks_in_dependent_materialized_views = settings[Setting::deduplicate_blocks_in_dependent_materialized_views];
+    materialized_views_ignore_errors = settings[Setting::materialized_views_ignore_errors];
+    ignore_materialized_views_with_dropped_target_table = settings[Setting::ignore_materialized_views_with_dropped_target_table];
 
     LOG_DEBUG(logger, "init_table_id {}, deduplicate_blocks_in_dependent_materialized_views {}, insert_null_as_default {}, materialized_views_ignore_errors {}", init_table_id, deduplicate_blocks_in_dependent_materialized_views, insert_null_as_default, materialized_views_ignore_errors);
 
@@ -671,6 +673,12 @@ bool ViewsManager::registerPath(VisitedPath path)
         if (inner_tables.contains(parent))
         {
             if (parent == init_table_id)
+                throw Exception(
+                    ErrorCodes::UNKNOWN_TABLE,
+                    "Target table '{}' of view '{}' doesn't exists.",
+                    current, init_table_id);
+
+            if (!ignore_materialized_views_with_dropped_target_table)
                 throw Exception(
                     ErrorCodes::UNKNOWN_TABLE,
                     "Target table '{}' of view '{}' doesn't exists.",

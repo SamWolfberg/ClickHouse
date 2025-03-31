@@ -143,6 +143,7 @@ public:
     bool deduplicate_blocks_in_dependent_materialized_views = false;
     bool insert_null_as_default = false;
     bool materialized_views_ignore_errors = false;
+    bool ignore_materialized_views_with_dropped_target_table = false;
 };
 
 
