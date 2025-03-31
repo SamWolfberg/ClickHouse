@@ -701,10 +701,11 @@ bool ViewsManager::registerPath(VisitedPath path)
     metadata_snapshots[current] = metadata;
     storage_locks[current] = std::move(lock);
 
-    auto set_defaults_for_root_view = [&] (const StorageIDPrivate & root_view_)
+    auto set_defaults_for_root_view = [&] (const StorageIDPrivate & root_view_, const StorageIDPrivate & inner_table_)
     {
         root_view = root_view_;
         LOG_DEBUG(logger, "set defaults for {}", root_view);
+        inner_tables[root_view_] = inner_table_;
         select_queries[root_view] = init_query;
         select_contexts[root_view] = init_context;
         insert_contexts[root_view] = init_context;
@@ -717,7 +718,7 @@ bool ViewsManager::registerPath(VisitedPath path)
     {
         if (current == init_table_id)
         {
-            set_defaults_for_root_view(init_table_id);
+            set_defaults_for_root_view(init_table_id, materialized_view->getTargetTableId());
             view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
             return true;
         }
@@ -789,7 +790,7 @@ bool ViewsManager::registerPath(VisitedPath path)
     {
         if (current == init_table_id)
         {
-            set_defaults_for_root_view(init_table_id);
+            set_defaults_for_root_view(init_table_id, {});
             view_types[current] = QueryViewsLogElement::ViewType::LIVE;
             return true;
         }
@@ -819,7 +820,7 @@ bool ViewsManager::registerPath(VisitedPath path)
     {
         if (current == init_table_id)
         {
-            set_defaults_for_root_view(init_table_id);
+            set_defaults_for_root_view(init_table_id, {});
             view_types[current] = QueryViewsLogElement::ViewType::WINDOW;
             return true;
         }
@@ -854,8 +855,7 @@ bool ViewsManager::registerPath(VisitedPath path)
 
         if (current == init_table_id)
         {
-            set_defaults_for_root_view({});
-            inner_tables[{}] = current;
+            set_defaults_for_root_view({}, current);
             output_headers[{}] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(init_header.getNames(), storage, metadata, skip_destination_table, allow_materialized);
             view_types[{}] = QueryViewsLogElement::ViewType::DEFAULT;
             return true;
