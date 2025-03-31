@@ -1869,6 +1869,14 @@ void ClientBase::sendData(Block & sample, const ColumnsDescription & columns_des
         }
     }
 
+    if (parsed_insert_query->columns)
+    {
+        ColumnsDescription reordered_description{};
+        for (const auto & col_name : parsed_insert_query->columns->children)
+            reordered_description.add(columns_description_for_query.get(col_name->getColumnName()));
+        columns_description_for_query = reordered_description;
+    }
+
     /// If data fetched from file (maybe compressed file)
     if (parsed_insert_query->infile)
     {

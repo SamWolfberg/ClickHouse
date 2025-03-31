@@ -15,3 +15,15 @@ select * from test order by x;
 "
 
 rm $CLICKHOUSE_TEST_UNIQUE_NAME.native
+
+$CLICKHOUSE_LOCAL -q "select 'world' as y, 42 as x format Values" > $CLICKHOUSE_TEST_UNIQUE_NAME.values
+$CLICKHOUSE_LOCAL -q "
+create table test (val UInt64, key String) engine=Memory;
+insert into test select * from file('$CLICKHOUSE_TEST_UNIQUE_NAME.values'); -- { serverError CANNOT_PARSE_TEXT }
+insert into test from infile '$CLICKHOUSE_TEST_UNIQUE_NAME.values' FORMAT Values; -- { clientError CANNOT_PARSE_TEXT }
+insert into test (key, val) select * from file('$CLICKHOUSE_TEST_UNIQUE_NAME.values');
+insert into test (key, val) from infile '$CLICKHOUSE_TEST_UNIQUE_NAME.values' FORMAT Values;
+select * from test order by key, val;
+"
+
+rm $CLICKHOUSE_TEST_UNIQUE_NAME.values
