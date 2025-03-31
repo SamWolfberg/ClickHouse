@@ -153,6 +153,7 @@ def main():
         res = results[-1].is_ok()
 
     if res and JobStages.BUILD in stages:
+        Shell.check("env")
         Shell.check("sccache --show-stats")
         Shell.check("find /ccache/clang-tidy-cache -type f")
         if build_type in BUILD_TYPE_TO_DEB_PACKAGE_TYPE:
