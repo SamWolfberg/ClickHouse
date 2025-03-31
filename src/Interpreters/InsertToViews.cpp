@@ -60,6 +60,7 @@
 #include "Processors/Chunk.h"
 #include "QueryPipeline/Chain.h"
 #include "QueryPipeline/Pipe.h"
+#include "base/UUID.h"
 #include "base/defines.h"
 #include "base/scope_guard.h"
 #include <Formats/FormatFactory.h>
@@ -664,44 +665,38 @@ bool ViewsManager::registerPath(VisitedPath path)
         if (current == init_table_id)
             throw Exception(
                 ErrorCodes::UNKNOWN_TABLE,
-                "Target table '{}' doesn't exists.",
+                "Table '{}' doesn't exists.",
                 init_table_id);
 
-        if (parent == init_table_id)
-            throw Exception(
-                ErrorCodes::UNKNOWN_TABLE,
-                "Target table '{}' of view '{}' doesn't exists.",
-                current, init_table_id);
-
-        if (parent)
+        if (inner_tables.contains(parent))
         {
-            if (init_context->getSettingsRef()[Setting::ignore_materialized_views_with_dropped_target_table])
-            {
-                LOG_WARNING(getLogger("FinalizingViewsTransform"),
-                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled. Target table '{}' of view '{}' doesn't exists.", current, parent);
-                return false;
-            }
+            if (parent == init_table_id)
+                throw Exception(
+                    ErrorCodes::UNKNOWN_TABLE,
+                    "Target table '{}' of view '{}' doesn't exists.",
+                    current, init_table_id);
 
-            throw Exception(
-                ErrorCodes::UNKNOWN_TABLE,
-                "Target table '{}' of view '{}' doesn't exists. To ignore this view use the setting ignore_materialized_views_with_dropped_target_table",
-                current, parent);
+            LOG_INFO(logger, "Trying to access target table '{}' of view '{}' but it doesn't exist", current, parent);
+            return false;
         }
 
-        UNREACHABLE();
+        LOG_INFO(logger, "Trying to access view '{}' but it doesn't exist", current);
+        return false;
     }
 
     auto lock = storage->tryLockForShare(init_context->getInitialQueryId(), init_context->getSettingsRef()[Setting::lock_acquire_timeout]);
-    if (lock == nullptr)
+    if (!lock)
     {
         // In case the materialized view is dropped/detached at this point, we register a warning and ignore it
         assert(storage->is_dropped || storage->is_detached);
-        LOG_WARNING(getLogger("ViewsManager"), "Trying to access table {} but it doesn't exist", current);
+        LOG_INFO(logger, "Trying to access table {} but it doesn't exist", current);
         return false;
     }
 
     auto metadata = storage->getInMemoryMetadataPtr();
 
+    chassert(storage);
+    LOG_DEBUG(logger, "Register storage {}", current);
     storages[current] = storage;
     metadata_snapshots[current] = metadata;
     storage_locks[current] = std::move(lock);
@@ -718,7 +713,7 @@ bool ViewsManager::registerPath(VisitedPath path)
         dependent_views[root_view] = {};
     };
 
-    if (dynamic_cast<StorageMaterializedView *>(storage.get()))
+    if (auto * materialized_view = dynamic_cast<StorageMaterializedView *>(storage.get()))
     {
         if (current == init_table_id)
         {
@@ -727,12 +722,12 @@ bool ViewsManager::registerPath(VisitedPath path)
             return true;
         }
 
-        const auto & select_table_id = metadata->getSelectQuery().select_table_id;
+        StorageIDPrivate select_table_id = metadata->getSelectQuery().select_table_id;
         if (select_table_id != path.parent())
         {
             /// It may happen if materialize view query was changed and it doesn't depend on this source table anymore.
             /// See setting `allow_experimental_alter_materialized_view_structure`
-            LOG_DEBUG(logger, "Table '{}' is not a source for view '{}' anymore, current source is '{}'",
+            LOG_INFO(logger, "Table '{}' is not a source for view '{}' anymore, current source is '{}'",
                 path.parent(), current, select_table_id);
             return false;
         }
@@ -768,6 +763,8 @@ bool ViewsManager::registerPath(VisitedPath path)
         if (insert_settings[Setting::min_insert_block_size_bytes_for_materialized_views])
             insert_context->setSetting("min_insert_block_size_bytes", insert_settings[Setting::min_insert_block_size_bytes_for_materialized_views].value);
 
+
+        inner_tables[current] = materialized_view->getTargetTableId();
 
         select_contexts[current] = select_context;
         insert_contexts[current] = insert_context;
@@ -850,8 +847,6 @@ bool ViewsManager::registerPath(VisitedPath path)
     }
     else
     {
-        inner_tables[parent] = current;
-
         if (init_context->hasQueryContext())
         {
             init_context->getQueryContext()->addQueryAccessInfo(current, /*column_names=*/ {});
@@ -860,6 +855,7 @@ bool ViewsManager::registerPath(VisitedPath path)
         if (current == init_table_id)
         {
             set_defaults_for_root_view({});
+            inner_tables[{}] = current;
             output_headers[{}] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(init_header.getNames(), storage, metadata, skip_destination_table, allow_materialized);
             view_types[{}] = QueryViewsLogElement::ViewType::DEFAULT;
             return true;
@@ -875,29 +871,11 @@ bool ViewsManager::registerPath(VisitedPath path)
         auto view_storage = storages.at(view_id);
         auto * m_view = dynamic_cast<StorageMaterializedView *>(view_storage.get());
         chassert(m_view);
-        bool check_access = !m_view->hasInnerTable() && m_view->getInMemoryMetadataPtr()->sql_security_type;
+        bool check_access = !m_view->hasInnerTable() && metadata_snapshots.at(view_id)->sql_security_type;
         if (check_access)
         {
             LOG_DEBUG(logger, "call checkAccess");
-            try
-            {
-                insert_contexts.at(view_id)->checkAccess(AccessType::INSERT, current, metadata->getSampleBlockInsertable().getNames());
-            }
-            catch (...)
-            {
-                if (!materialized_views_ignore_errors)
-                    throw;
-
-                auto exception = addStorageToException(std::current_exception(), view_id);
-                tryLogException(
-                    exception,
-                    getLogger("FinalizingViewsTransform"),
-                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.",
-                    LogsLevel::warning);
-
-                logQueryView(view_id, exception, /*before_start*/ true);
-                return false;
-            }
+            insert_contexts.at(view_id)->checkAccess(AccessType::INSERT, current, metadata->getSampleBlockInsertable().getNames());
         }
 
         dependent_views[path.prevPrevParent()].push_back(view_id);
@@ -921,28 +899,48 @@ void ViewsManager::buildRelaitions()
              path.popBack();
         });
 
-        if (!registerPath(path))
-            return;
+        try
+        {
+            if (!registerPath(path))
+                return;
+        }
+        catch (...)
+        {
+            if (!materialized_views_ignore_errors)
+                throw;
 
-        auto storage = storages.at(id);
-        if (auto * materialized_view = dynamic_cast<StorageMaterializedView *>(storage.get()))
-        {
-            expand(materialized_view->getTargetTableId());
+            if (path.current() == init_table_id)
+                throw;
+
+            auto view_id = path.current();
+            if (!inner_tables.contains(view_id))
+                view_id = path.parent();
+
+            if (view_id == init_table_id)
+                throw;
+
+            auto exception = addStorageToException(std::current_exception(), view_id);
+            tryLogException(
+                exception,
+                logger,
+                "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.",
+                LogsLevel::warning);
+            logQueryView(view_id, exception, /*before_start*/ true);
+            return;
         }
-        else if (dynamic_cast<StorageLiveView*>(storage.get()))
+
+        auto inner_table_iterator = inner_tables.find(id);
+        if (inner_table_iterator != inner_tables.end()) /// StorageMaterializedView, StorageLiveView, StorageWindowView
         {
-            // no op
-        }
-        else if (dynamic_cast<StorageWindowView*>(storage.get()))
-        {
-            // no op
+            /// only StorageMaterializedView
+            if (!inner_table_iterator->second.empty())
+                expand(inner_table_iterator->second);
         }
         else
         {
+            // Destination tables for StorageMaterializedView
             for (auto & child : DatabaseCatalog::instance().getDependentViews(id))
-            {
                 expand(child);
-            }
         }
     };
 
@@ -1067,8 +1065,13 @@ Chain ViewsManager::createPreSink(StorageIDPrivate view_id) const
     Chain chain;
 
     auto table_id = inner_tables.at(view_id);
-
     LOG_DEBUG(logger, "createPreSink: {}, table id {}", view_id, table_id);
+
+    for (const auto & [key, _] : storages)
+    {
+        LOG_DEBUG(logger, "key {}, view_id == key: {}, table_id == key: {}, key in map {}, view_id in map {}, table_id in map {}",
+            key, key == view_id, table_id == key, storages.contains(key), storages.contains(view_id), storages.contains(table_id));
+    }
 
     LOG_DEBUG(logger, "createPreSink: {}, table id {} has storage {}", view_id, table_id, storages.contains(table_id));
     auto storage = storages.at(table_id);
@@ -1458,15 +1461,13 @@ ViewsManager::StorageIDPrivate::StorageIDPrivate(const StorageID & other) // NOL
 }
 
 
-bool ViewsManager::StorageIDPrivate::operator<(const StorageID & other) const
+bool ViewsManager::StorageIDPrivate::operator<(const StorageIDPrivate & other) const
 {
-    if (hasUUID() && other.hasUUID())
-        return uuid < other.uuid;
-    return std::tuple(database_name, table_name) < std::tuple(other.database_name, other.table_name);
+    return std::tie(uuid, database_name, table_name) < std::tie(other.uuid, other.database_name, other.table_name);
 }
 
 
-bool ViewsManager::StorageIDPrivate::operator==(const StorageID & other) const
+bool ViewsManager::StorageIDPrivate::operator==(const StorageIDPrivate & other) const
 {
     if (empty() && other.empty())
         return true;

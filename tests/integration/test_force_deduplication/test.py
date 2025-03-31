@@ -34,6 +34,15 @@ def test_basic(start_cluster):
 
     node.query(
         """
+        DROP TABLE IF EXISTS test_mv_c SYNC;
+        DROP TABLE IF EXISTS test_mv_b SYNC;
+        DROP TABLE IF EXISTS test_mv_a SYNC;
+        DROP TABLE IF EXISTS test SYNC;
+        """
+    )
+
+    node.query(
+        """
         CREATE TABLE test (A Int64) ENGINE = ReplicatedMergeTree ('/clickhouse/test/tables/test','1') ORDER BY tuple();
         CREATE MATERIALIZED VIEW test_mv_a Engine=ReplicatedMergeTree ('/clickhouse/test/tables/test_mv_a','1') order by tuple() AS SELECT A FROM test;
         CREATE MATERIALIZED VIEW test_mv_b Engine=ReplicatedMergeTree ('/clickhouse/test/tables/test_mv_b','1') partition by A order by tuple() AS SELECT A FROM test;

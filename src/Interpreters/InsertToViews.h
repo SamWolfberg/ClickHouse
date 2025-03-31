@@ -36,8 +36,8 @@ private:
         StorageIDPrivate();
         StorageIDPrivate(const StorageID & other); // NOLINT this is an implicit c-tor
 
-        bool operator<(const StorageID & other) const;
-        bool operator==(const StorageID & other) const;
+        bool operator<(const StorageIDPrivate & other) const;
+        bool operator==(const StorageIDPrivate & other) const;
     };
 
     struct BundleID
@@ -113,7 +113,7 @@ private:
 
     static QueryViewsLogElement::ViewStatus getQueryViewStatus(std::exception_ptr exception, bool before_start);
 
-    StorageID init_table_id;
+    StorageIDPrivate init_table_id;
     StoragePtr init_storage;
     ASTPtr init_query;
     Block init_header;
