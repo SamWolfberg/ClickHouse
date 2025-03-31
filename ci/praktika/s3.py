@@ -113,26 +113,45 @@ class S3:
 
     @classmethod
     def copy_file_to_s3(cls, s3_path, local_path, text=False, with_rename=False):
-        assert Path(local_path).exists(), f"Path [{local_path}] does not exist"
-        assert Path(s3_path), f"Invalid S3 Path [{s3_path}]"
-        assert Path(
-            local_path
-        ).is_file(), f"Path [{local_path}] is not file. Only files are supported"
-        file_name = Path(local_path).name
+        local_path = Path(local_path)
+        assert local_path.exists(), f"Local path [{local_path}] does not exist"
+        assert local_path.is_file(), f"Local path [{local_path}] is not a file"
+
+        file_name = local_path.name
+
+        if not s3_path or not isinstance(s3_path, str):
+            raise ValueError(f"Invalid S3 path: {s3_path}")
+
+        # Determine full S3 path
         s3_full_path = s3_path
-        if not s3_full_path.endswith(file_name) and not with_rename:
-            s3_full_path = f"{s3_path}/{Path(local_path).name}"
+        if not s3_path.endswith(file_name) and not with_rename:
+            s3_full_path = f"{s3_path.rstrip('/')}/{file_name}"
+
+        # Construct AWS CLI command
         cmd = f"aws s3 cp {local_path} s3://{s3_full_path}"
+
         if text:
             cmd += " --content-type text/plain"
+            if file_name.endswith(".zst"):
+                cmd += " --content-encoding zstd"
+            elif file_name.endswith(".gz"):
+                cmd += " --content-encoding gzip"
+
         res = cls.run_command_with_retries(cmd)
         if not res:
-            raise RuntimeError()
-        StorageUsage.add_uploaded(local_path)
+            raise RuntimeError(
+                f"Failed to upload file {local_path} to s3://{s3_full_path}"
+            )
+
+        StorageUsage.add_uploaded(str(local_path))
+
+        # Replace bucket name with public HTTP endpoint
         bucket = s3_path.split("/")[0]
-        endpoint = Settings.S3_BUCKET_TO_HTTP_ENDPOINT[bucket]
-        assert endpoint
-        return quote(f"https://{s3_full_path}".replace(bucket, endpoint), safe=":/?&=")
+        endpoint = Settings.S3_BUCKET_TO_HTTP_ENDPOINT.get(bucket)
+        assert endpoint, f"No HTTP endpoint configured for bucket: {bucket}"
+
+        url = f"https://{s3_full_path}".replace(bucket, endpoint)
+        return quote(url, safe=":/?&=")
 
     @classmethod
     def put(cls, s3_path, local_path, text=False, metadata=None, if_none_matched=False):
@@ -289,25 +308,50 @@ class S3:
     def _upload_file_to_s3(
         cls, local_file_path, upload_to_s3: bool, text: bool = False, s3_subprefix=""
     ) -> str:
-        if upload_to_s3:
-            env = _Environment.get()
-            s3_path = f"{Settings.HTML_S3_PATH}/{env.get_s3_prefix()}"
-            if s3_subprefix:
-                s3_subprefix.removeprefix("/").removesuffix("/")
-                s3_path += f"/{s3_subprefix}"
-            if text and Settings.COMPRESS_THRESHOLD_MB > 0:
-                file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
-                if file_size_mb > Settings.COMPRESS_THRESHOLD_MB:
+        local_file_path = Path(local_file_path)
+
+        if not upload_to_s3:
+            return f"file://{local_file_path.absolute()}"
+
+        env = _Environment.get()
+        s3_path = f"{Settings.HTML_S3_PATH}/{env.get_s3_prefix()}"
+
+        # Sanitize subprefix
+        if s3_subprefix:
+            s3_subprefix = s3_subprefix.lstrip("/").rstrip("/")
+            s3_path += f"/{s3_subprefix}"
+
+        destination_file_name = local_file_path.name
+
+        if text:
+            file_size_mb = local_file_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > 0:
+                print(f"Note: compressing text file [{local_file_path}]")
+                local_file_path = cls.compress_file(local_file_path)
+                if (
+                    Settings.COMPRESS_THRESHOLD_MB > 0
+                    and file_size_mb > Settings.COMPRESS_THRESHOLD_MB
+                ):
                     print(
-                        f"NOTE: File [{local_file_path}] exceeds threshold [Settings.COMPRESS_THRESHOLD_MB:{Settings.COMPRESS_THRESHOLD_MB}] - compress"
+                        f"NOTE: File [{local_file_path}] exceeded compression threshold "
+                        f"({Settings.COMPRESS_THRESHOLD_MB}MB). Uploading as archive (text=False)"
                     )
                     text = False
-                    local_file_path = cls.compress_file(local_file_path)
-            html_link = S3.copy_file_to_s3(
-                s3_path=s3_path, local_path=local_file_path, text=text
-            )
-            return html_link
-        return f"file://{Path(local_file_path).absolute()}"
+                    destination_file_name = Path(
+                        local_file_path
+                    ).name  # use compressed name
+
+        # Ensure final path includes filename
+        if not s3_path.endswith(destination_file_name):
+            s3_path += f"/{destination_file_name}"
+
+        html_link = S3.copy_file_to_s3(
+            s3_path=s3_path,
+            local_path=local_file_path,
+            text=text,
+            with_rename=True,
+        )
+        return html_link
 
     @classmethod
     def _dump_urls(cls, s3_path):
